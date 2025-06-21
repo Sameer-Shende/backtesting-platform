@@ -5,6 +5,7 @@ import httpx
 import pandas as pd
 import numpy as np
 import ta
+from datetime import datetime, timedelta
 
 app = FastAPI()
 
@@ -26,37 +27,74 @@ class BacktestRequest(BaseModel):
     interval: str
     market: str
     strategy: list[StrategyBlock]
-    hours: int  # <-- new
+    hours: int
 
+def interval_to_milliseconds(interval: str) -> int:
+    mapping = {
+        "1m": 60_000,
+        "3m": 180_000,
+        "5m": 300_000,
+        "15m": 900_000,
+        "30m": 1_800_000,
+        "1h": 3_600_000,
+        "2h": 7_200_000,
+        "4h": 14_400_000,
+        "6h": 21_600_000,
+        "8h": 28_800_000,
+        "12h": 43_200_000,
+        "1d": 86_400_000,
+    }
+    return mapping.get(interval, 60_000)
 
 @app.post("/backtest")
 async def backtest(req: BacktestRequest):
-    # 1. Fetch OHLCV from Binance
-    limit = min(req.hours, 1000)
+    end_time = int(datetime.utcnow().timestamp() * 1000)
+    start_time = end_time - req.hours * 3600 * 1000
+    all_data = []
+    url = "https://fapi.binance.com/fapi/v1/klines" if req.market == "futures" else "https://api.binance.com/api/v3/klines"
 
-    if req.market == "futures":
-        url = f"https://fapi.binance.com/fapi/v1/klines?symbol={req.symbol}&interval={req.interval}&limit={limit}"
-    else:
-        url = f"https://api.binance.com/api/v3/klines?symbol={req.symbol}&interval={req.interval}&limit={limit}"
+    try:
+        while start_time < end_time:
+            params = {
+                "symbol": req.symbol,
+                "interval": req.interval,
+                "startTime": start_time,
+                "limit": 1000
+            }
+            async with httpx.AsyncClient(timeout=10) as client:
+                res = await client.get(url, params=params)
+                res.raise_for_status()
+                chunk = res.json()
 
+            if not chunk:
+                break
 
-    async with httpx.AsyncClient() as client:
-        res = await client.get(url)
-        raw = res.json()
+            all_data.extend(chunk)
+            last_time = chunk[-1][0]
+            start_time = last_time + interval_to_milliseconds(req.interval)
 
-    df = pd.DataFrame(raw, columns=[
+            if len(chunk) < 1000:
+                break
+
+    except Exception as e:
+        print("❌ OHLCV Fetch Failed:", e)
+        return {
+            "pnl": None,
+            "trades": [],
+            "strategy": "",
+            "error": f"OHLCV fetch error: {e}"
+        }
+
+    df = pd.DataFrame(all_data, columns=[
         "timestamp", "open", "high", "low", "close", "volume",
         "_", "_", "_", "_", "_", "_"
     ])
-    
     df["close"] = pd.to_numeric(df["close"])
 
-    # 2. Calculate indicators
     df["ema"] = ta.trend.ema_indicator(df["close"], window=10)
     df["macd"] = ta.trend.macd_diff(df["close"])
     df["rsi"] = ta.momentum.rsi(df["close"], window=14)
 
-    # 3. Convert strategy blocks to expression string
     expr_parts = []
     for block in req.strategy:
         if block.type == "indicator":
@@ -64,12 +102,7 @@ async def backtest(req: BacktestRequest):
         elif block.type == "operator":
             expr_parts.append(block.value)
         elif block.type == "logic":
-            if block.value.upper() == "AND":
-                expr_parts.append("&")
-            elif block.value.upper() == "OR":
-                expr_parts.append("|")
-            else:
-                expr_parts.append(block.value)
+            expr_parts.append("&" if block.value.upper() == "AND" else "|" if block.value.upper() == "OR" else block.value)
         elif block.type == "value":
             expr_parts.append(f'{block.value}')
 
@@ -89,7 +122,6 @@ async def backtest(req: BacktestRequest):
             "error": f"Strategy parse error: {e}"
         }
 
-    # 5. Simple trade simulation: Buy → Sell on next False
     trades = []
     in_trade = False
     entry_price = 0
@@ -104,7 +136,6 @@ async def backtest(req: BacktestRequest):
             exit_price = df.loc[i, "close"]
             trades.append({"index": i, "action": "sell", "price": exit_price})
 
-    # 6. Metrics
     pnl = 0.0
     returns = []
     wins = 0
