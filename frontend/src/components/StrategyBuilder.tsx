@@ -33,6 +33,7 @@ export default function StrategyBuilder() {
   const [canvas, setCanvas] = useState<any[]>([]);
   const [customValue, setCustomValue] = useState("");
   const [result, setResult] = useState<any>(null);
+  const [errorMessage, setErrorMessage] = useState("");
   const [symbol, setSymbol] = useState("BTCUSDT");
   const [interval, setInterval] = useState("1h");
   const [market, setMarket] = useState("spot");
@@ -41,11 +42,7 @@ export default function StrategyBuilder() {
   const handleDragEnd = (result: DropResult) => {
     const { source, destination, draggableId } = result;
     if (!destination) return;
-
-    if (
-      source.droppableId === "blockList" &&
-      destination.droppableId === "canvas"
-    ) {
+    if (source.droppableId === "blockList" && destination.droppableId === "canvas") {
       const newBlock = strategyBlocks.find((b) => b.id === draggableId);
       if (newBlock) {
         setCanvas((prev) => [...prev, newBlock]);
@@ -64,6 +61,7 @@ export default function StrategyBuilder() {
   };
 
   const handleBacktest = async () => {
+    setErrorMessage("");
     const strategyJSON = canvas.map((block) => {
       if (block.type === "indicator") return { type: "indicator", name: block.name };
       if (block.type === "operator" || block.type === "logic")
@@ -79,27 +77,21 @@ export default function StrategyBuilder() {
       timeRangeOptions[timeRange],
       strategyJSON
     );
-    setResult(response);
+
+    if (response.error) {
+      setResult(null);
+      setErrorMessage("❌ " + response.error);
+    } else if (!response.df || response.df.length < 2) {
+      setResult(null);
+      setErrorMessage("⚠️ Not enough data returned. Try increasing duration or using a shorter interval.");
+    } else {
+      setResult(response);
+    }
   };
 
-  const selectors: [string, string, React.Dispatch<React.SetStateAction<string>>, string[]][] = [
-    ["Symbol", symbol, setSymbol, symbolOptions],
-    ["Market", market, setMarket, marketOptions],
-    ["Interval", interval, setInterval, intervalOptions],
-    ["Duration", timeRange, setTimeRange, Object.keys(timeRangeOptions)],
-  ];
-
   return (
-    <div style={{
-      display: "flex",
-      flexDirection: "column",
-      padding: "1rem",
-      gap: "1rem",
-      maxWidth: "100%",
-      margin: "auto",
-      width: "100%",
-    }}>
-      {/* Market Controls */}
+    <div style={{ display: "flex", flexDirection: "column", padding: "1rem", gap: "1rem" }}>
+      {/* Dropdowns */}
       <div style={{ display: "flex", gap: "2rem", flexWrap: "wrap" }}>
         <div>
           <label>Symbol</label><br />
@@ -126,11 +118,11 @@ export default function StrategyBuilder() {
           </select>
         </div>
       </div>
-  
-      {/* Drag and Drop Builder & Backtest Panel */}
+
+      {/* DnD builder and backtest */}
       <div style={{ display: "flex", gap: "2rem", alignItems: "flex-start", width: "100%" }}>
+        {/* Strategy Blocks */}
         <DragDropContext onDragEnd={handleDragEnd}>
-          {/* Blocks List */}
           <Droppable droppableId="blockList" isDropDisabled>
             {(provided) => (
               <div
@@ -181,7 +173,7 @@ export default function StrategyBuilder() {
               </div>
             )}
           </Droppable>
-  
+
           {/* Strategy Canvas */}
           <Droppable droppableId="canvas">
             {(provided) => (
@@ -216,8 +208,8 @@ export default function StrategyBuilder() {
             )}
           </Droppable>
         </DragDropContext>
-  
-        {/* Run Backtest Panel */}
+
+        {/* Results Panel */}
         <div style={{
           minWidth: "320px",
           background: "#f5f5f5",
@@ -227,34 +219,28 @@ export default function StrategyBuilder() {
           alignSelf: "stretch",
         }}>
           <button onClick={handleBacktest}>Run Backtest</button>
-          {result && (
-            <div style={{ marginTop: "2rem", width: "100%" }}>
+          {errorMessage && (
+            <p style={{ marginTop: "1rem", color: "red", fontWeight: "bold" }}>{errorMessage}</p>
+          )}
+          {result && !result.error && (
+            <div style={{ marginTop: "2rem" }}>
               <h4>📊 Backtest Result</h4>
-              {result.error ? (
-                <p style={{ color: "red" }}>❌ {result.error}</p>
-              ) : (
-                <>
-                  <div style={{ lineHeight: 1.8 }}>
-                    <p>💰 PnL: {result.pnl}</p>
-                    <p>📉 Max Drawdown: {result.max_drawdown}</p>
-                    <p>📈 Sharpe Ratio: {result.sharpe_ratio}</p>
-                    <p>🏆 Win Rate: {result.win_rate}</p>
-                    <p>🔁 Trades: {result.trades?.length}</p>
-                  </div>
-                </>
-              )}
+              <p>💰 PnL: {result.pnl}</p>
+              <p>📉 Max Drawdown: {result.max_drawdown}</p>
+              <p>📈 Sharpe Ratio: {result.sharpe_ratio}</p>
+              <p>🏆 Win Rate: {result.win_rate}</p>
+              <p>🔁 Trades: {result.trades?.length}</p>
             </div>
           )}
         </div>
       </div>
-  
-      {/* Chart Display */}
-      {result && !result.error && (
+
+      {/* Chart */}
+      {result && !result.error && result.df?.length > 0 && (
         <div style={{ marginTop: "2rem", width: "100%" }}>
           <TradeChart data={result.df} trades={result.trades} />
         </div>
       )}
     </div>
   );
-  
 }

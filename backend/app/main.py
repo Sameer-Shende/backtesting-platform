@@ -5,7 +5,7 @@ import httpx
 import pandas as pd
 import numpy as np
 import ta
-from datetime import datetime, timedelta
+from datetime import datetime
 
 app = FastAPI()
 
@@ -17,10 +17,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 class StrategyBlock(BaseModel):
     type: str
     name: str | None = None
     value: str | None = None
+
 
 class BacktestRequest(BaseModel):
     symbol: str
@@ -28,6 +30,7 @@ class BacktestRequest(BaseModel):
     market: str
     strategy: list[StrategyBlock]
     hours: int
+
 
 def interval_to_milliseconds(interval: str) -> int:
     mapping = {
@@ -46,12 +49,19 @@ def interval_to_milliseconds(interval: str) -> int:
     }
     return mapping.get(interval, 60_000)
 
+
 @app.post("/backtest")
 async def backtest(req: BacktestRequest):
+    interval_ms = interval_to_milliseconds(req.interval)
     end_time = int(datetime.utcnow().timestamp() * 1000)
     start_time = end_time - req.hours * 3600 * 1000
     all_data = []
-    url = "https://fapi.binance.com/fapi/v1/klines" if req.market == "futures" else "https://api.binance.com/api/v3/klines"
+
+    url = (
+        "https://fapi.binance.com/fapi/v1/klines"
+        if req.market == "futures"
+        else "https://api.binance.com/api/v3/klines"
+    )
 
     try:
         while start_time < end_time:
@@ -59,9 +69,11 @@ async def backtest(req: BacktestRequest):
                 "symbol": req.symbol,
                 "interval": req.interval,
                 "startTime": start_time,
-                "limit": 1000
+                "endTime": end_time,
+                "limit": 1000,
             }
-            async with httpx.AsyncClient(timeout=10) as client:
+
+            async with httpx.AsyncClient(timeout=15) as client:
                 res = await client.get(url, params=params)
                 res.raise_for_status()
                 chunk = res.json()
@@ -71,7 +83,13 @@ async def backtest(req: BacktestRequest):
 
             all_data.extend(chunk)
             last_time = chunk[-1][0]
-            start_time = last_time + interval_to_milliseconds(req.interval)
+
+            if last_time == start_time:
+                # Avoid infinite loop
+                break
+
+            # move to the next candle after the last one fetched
+            start_time = last_time + 1
 
             if len(chunk) < 1000:
                 break
@@ -82,19 +100,41 @@ async def backtest(req: BacktestRequest):
             "pnl": None,
             "trades": [],
             "strategy": "",
-            "error": f"OHLCV fetch error: {e}"
+            "error": f"OHLCV fetch error: {e}",
         }
 
-    df = pd.DataFrame(all_data, columns=[
-        "timestamp", "open", "high", "low", "close", "volume",
-        "_", "_", "_", "_", "_", "_"
-    ])
-    df["close"] = pd.to_numeric(df["close"])
+    if len(all_data) < 2:
+        return {
+            "pnl": None,
+            "trades": [],
+            "strategy": "",
+            "error": "Not enough data returned. Try increasing duration or choosing a shorter interval.",
+        }
 
+    df = pd.DataFrame(
+        all_data,
+        columns=[
+            "timestamp",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "_1",
+            "_2",
+            "_3",
+            "_4",
+            "_5",
+            "_6",
+        ],
+    )
+
+    df["close"] = pd.to_numeric(df["close"])
     df["ema"] = ta.trend.ema_indicator(df["close"], window=10)
     df["macd"] = ta.trend.macd_diff(df["close"])
     df["rsi"] = ta.momentum.rsi(df["close"], window=14)
 
+    # Build strategy expression
     expr_parts = []
     for block in req.strategy:
         if block.type == "indicator":
@@ -104,7 +144,7 @@ async def backtest(req: BacktestRequest):
         elif block.type == "logic":
             expr_parts.append("&" if block.value.upper() == "AND" else "|" if block.value.upper() == "OR" else block.value)
         elif block.type == "value":
-            expr_parts.append(f'{block.value}')
+            expr_parts.append(f"{block.value}")
 
     expr = " ".join(expr_parts)
     print("Evaluating strategy:", expr)
@@ -119,9 +159,10 @@ async def backtest(req: BacktestRequest):
             "pnl": None,
             "trades": [],
             "strategy": expr,
-            "error": f"Strategy parse error: {e}"
+            "error": f"Strategy parse error: {e}",
         }
 
+    # Trade simulation
     trades = []
     in_trade = False
     entry_price = 0
@@ -165,5 +206,5 @@ async def backtest(req: BacktestRequest):
         "trades": trades,
         "strategy": expr,
         "df": df[["timestamp", "close", "ema", "macd", "rsi"]].tail(200).to_dict(orient="records"),
-        "error": None
+        "error": None,
     }
