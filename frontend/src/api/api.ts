@@ -1,7 +1,7 @@
 // src/api/api.ts
 import axios from "axios";
 
-const BASE_URL = "http://localhost:8000"; // Change if your backend runs elsewhere
+const BASE_URL = "http://localhost:8000"; 
 
 export async function runBacktest(
   symbol: string,

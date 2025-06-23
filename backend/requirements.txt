@@ -2,3 +2,8 @@ fastapi
 uvicorn
 httpx
 pandas
+numpy
+ta
+httpx
+datetime
+pydantic
